@@ -4,7 +4,7 @@ export const PUBLIC_TYPES = ['order.create', 'order.track'];
 export const MITRA_TYPES = ['partner.me', 'partner.report', 'partner.restok'];
 export const accessOf = t => PUBLIC_TYPES.includes(t) ? 'public' : MITRA_TYPES.includes(t) ? 'mitra' : 'admin';
 export const JENIS = { awal: 'Stok awal', masuk: 'Stok masuk', keluar: 'Stok keluar', sesuai: 'Penyesuaian', pesanan: 'Pesanan masuk', batal: 'Pesanan dibatalkan', mitra: 'Kirim ke mitra', cfd: 'Jual langsung/CFD' };
-export const STATUS = { baru: 'Baru', diproses: 'Diproses', dikirim: 'Dikirim', selesai: 'Selesai', batal: 'Dibatalkan' };
+export const STATUS = { baru: 'Baru', diproses: 'Diproses', dikirim: 'Siap Dikirim', selesai: 'Selesai', batal: 'Dibatalkan' };
 export const NEXT = { baru: ['diproses', 'batal'], diproses: ['dikirim', 'batal'], dikirim: ['selesai', 'batal'] };
 export const stat = v => v.stok <= 0 ? 'habis' : v.stok <= v.min ? 'menipis' : 'aman';
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -60,19 +60,25 @@ export function apply(S0, a, now = new Date().toISOString()) {
     }
     case 'order.create': {
       const nama = txt(p.nama, 'Isi nama pemesan.', 50), hp = String(p.hp || '').replace(/\D/g, '');
-      if (hp.length < 9 || hp.length > 15) E('Nomor WhatsApp tidak valid.');
+      if (hp.length < 9 || hp.length > 15) E('Nomor telepon tidak valid.');
+      const email = String(p.email || '').trim().toLowerCase();
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) E('Alamat email tidak valid.');
+      const tanggal = String(p.tanggal || now.slice(0, 10));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(tanggal) || Number.isNaN(Date.parse(`${tanggal}T00:00:00Z`)) || new Date(`${tanggal}T00:00:00Z`).toISOString().slice(0, 10) !== tanggal) E('Tanggal pesanan tidak valid.');
       const ls = lines(S, p.items);
       ls.forEach(({ v, qty }) => { if (qty > v.stok) E(`Stok ${v.varian} tersisa ${v.stok}.`); });
       const no = 'KC-' + String(++S.n).padStart(4, '0');
       ls.forEach(({ v, qty }) => log(v, 'pesanan', -qty, nama, no));
       const items = snap(ls), total = sum(items);
-      S.o.push({ id: uid(), no, nama, hp, cat: String(p.cat || '').slice(0, 120), items, total, status: 'baru', t: now, hist: [{ status: 'baru', t: now }] });
+      S.o.push({ id: uid(), no, nama, hp, email, tanggal, alamat: String(p.alamat || '').trim().slice(0, 180), cat: String(p.cat || '').slice(0, 120), items, total, status: 'baru', t: now, hist: [{ status: 'baru', t: now }] });
       res = { no, total }; break;
     }
     case 'order.track': {
-      const hp = String(p.hp || '').replace(/\D/g, ''), o = S.o.find(x => x.no === String(p.no || '').trim().toUpperCase());
-      if (!o || hp.length < 6 || o.hp.slice(-6) !== hp.slice(-6)) E('Pesanan tidak ditemukan. Periksa kode dan nomor WhatsApp.');
-      res = { no: o.no, nama: o.nama, status: o.status, total: o.total, t: o.t, items: o.items, hist: o.hist }; break;
+      const email = String(p.email || '').trim().toLowerCase(), no = String(p.no || '').trim().toUpperCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || no.length > 32) E('Nomor pesanan atau email tidak cocok.');
+      const o = S.o.find(x => x.no === no);
+      if (!o || !o.email || o.email.toLowerCase() !== email) E('Nomor pesanan atau email tidak cocok.');
+      res = { no: o.no, nama: o.nama, status: o.status, total: o.total, t: o.t, tanggal: o.tanggal, items: o.items, hist: o.hist }; break;
     }
     case 'order.status': {
       const o = S.o.find(x => x.id === p.id) || E('Pesanan tidak ditemukan.');

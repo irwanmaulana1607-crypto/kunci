@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
-import { load, act, getMode } from './api.js';
-import { WA_NUMBER } from './config.js';
+import { load, act, findLocalOrder, sendOrderEmail } from './api.js';
 import { JENIS, STATUS, NEXT, stat } from '../shared/logic.js';
 
 const rp = n => 'Rp' + Number(n || 0).toLocaleString('id-ID');
 const tgl = t => new Date(t).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
-const wa = hp => 'https://wa.me/' + (hp.startsWith('0') ? '62' + hp.slice(1) : hp);
+const localDate = () => {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+const tanggalOrder = order => order.tanggal
+  ? new Date(`${order.tanggal}T00:00:00`).toLocaleDateString('id-ID', { dateStyle: 'medium' })
+  : tgl(order.t);
 const nm = v => `${v.produk} ${v.varian} ${v.ukuran}`;
 const LB = { aman: 'Aman', menipis: 'Menipis', habis: 'Habis' };
 const PC = { aman: 'bg-green-100 text-ok', menipis: 'bg-orange-200 text-wa', habis: 'bg-red-200 text-rd', off: 'bg-stone-200 text-stone-600', baru: 'bg-orange-200 text-wa', diproses: 'bg-amber-200 text-amber-900', dikirim: 'bg-sky-100 text-sky-800', selesai: 'bg-green-100 text-ok', batal: 'bg-red-200 text-rd' };
@@ -27,27 +32,47 @@ function QtyGrid({ vs, val, set, max }) {
 }
 
 /* ───────── KONSUMEN: pesan ───────── */
-function Shop({ catalog, run }) {
-  const [cart, setCart] = useState({}), [f, setF] = useState({ nama: '', hp: '', cat: '' }), [done, setDone] = useState(null), [busy, setBusy] = useState(false);
+function Shop({ catalog, run, notify }) {
+  const [cart, setCart] = useState({}), [f, setF] = useState({ nama: '', email: '', hp: '', tanggal: localDate(), alamat: '', cat: '' }), [done, setDone] = useState(null), [busy, setBusy] = useState(false);
   const ls = catalog.filter(v => cart[v.id] > 0), total = ls.reduce((a, v) => a + v.harga * cart[v.id], 0), count = ls.reduce((a, v) => a + cart[v.id], 0);
   const q = (v, n) => setCart(c => ({ ...c, [v.id]: Math.max(0, Math.min(v.stok, n)) }));
   const on = k => e => setF(x => ({ ...x, [k]: e.target.value }));
+  const emailOrder = async no => {
+    setDone(current => current?.no === no ? { ...current, emailStatus: 'sending' } : current);
+    try {
+      const delivery = await sendOrderEmail(no, 'confirmation', '', findLocalOrder(no));
+      setDone(current => current?.no === no ? { ...current, emailStatus: 'sent', emailRecipient: delivery.recipient } : current);
+      return delivery;
+    } catch (error) {
+      setDone(current => current?.no === no ? { ...current, emailStatus: 'failed' } : current);
+      return error instanceof Error ? error.message : 'Email gagal dikirim.';
+    }
+  };
   const submit = async e => {
     e.preventDefault(); setBusy(true);
     const r = await run('order.create', { ...f, items: ls.map(v => ({ vid: v.id, qty: cart[v.id] })) });
     setBusy(false);
-    if (r) { setDone({ ...r, nama: f.nama }); setCart({}); setF({ nama: '', hp: '', cat: '' }); }
+    if (r?.no) {
+      setDone({ ...r, nama: f.nama, email: f.email, emailStatus: 'sending' });
+      setCart({});
+      setF({ nama: '', email: '', hp: '', tanggal: localDate(), alamat: '', cat: '' });
+      const emailResult = await emailOrder(r.no);
+      if (emailResult && typeof emailResult === 'object') notify(emailResult.recipient === 'test' ? 'Pesanan tersimpan dan email uji terkirim ke penerima Resend yang dikonfigurasi.' : 'Pesanan tersimpan dan email konfirmasi terkirim.');
+      else notify(`Pesanan tersimpan, tetapi email gagal: ${emailResult}`, true);
+    }
   };
   if (done) {
-    const msg = encodeURIComponent(`Halo Pedasan Kunchung, saya ${done.nama} sudah memesan lewat KUNCI. Kode pesanan: ${done.no}.`);
     return <div className="card text-center max-w-lg mx-auto">
       <h2 className="text-5xl text-rd mb-2">Pesanan masuk!</h2>
       <p className="text-sm">Simpan kode ini untuk melacak pesananmu.</p>
       <p className="font-display text-6xl text-or my-3">{done.no}</p>
-      <p className="mb-4">Total {rp(done.total)}. Admin akan menghubungimu lewat WhatsApp untuk konfirmasi dan pembayaran.</p>
+      <p className="mb-3">Total {rp(done.total)}. Status pengiriman email konfirmasi ditampilkan di bawah.</p>
+      <p role="status" className={'mb-4 text-sm ' + (done.emailStatus === 'failed' ? 'text-rd' : 'text-ok')}>
+        {done.emailStatus === 'sending' ? 'Mengirim email konfirmasi…' : done.emailStatus === 'sent' ? done.emailRecipient === 'test' ? 'Email uji terkirim ke penerima Resend yang dikonfigurasi; email ini belum dikirim ke alamat konsumen.' : `Email konfirmasi terkirim ke ${done.email}.` : 'Pesanan tersimpan, tetapi email konfirmasi belum terkirim.'}
+      </p>
       <div className="flex flex-wrap gap-2 justify-center">
-        <a className="btn" href={`https://wa.me/${WA_NUMBER}?text=${msg}`} target="_blank" rel="noreferrer">Konfirmasi lewat WhatsApp</a>
-        <a className="btn-g" href="#/lacak">Lacak pesanan</a>
+        {done.emailStatus === 'failed' && <button className="btn" onClick={() => emailOrder(done.no)}>Kirim ulang email</button>}
+        <a className="btn-g" href="#/tracking">Lacak pesanan</a>
         <button className="btn-g" onClick={() => setDone(null)}>Pesan lagi</button>
       </div></div>;
   }
@@ -75,7 +100,10 @@ function Shop({ catalog, run }) {
           <ul className="text-sm space-y-1">{ls.map(v => <li key={v.id} className="flex justify-between"><span>{cart[v.id]}× {v.varian}</span><span>{rp(v.harga * cart[v.id])}</span></li>)}</ul>
           <p className="flex justify-between font-semibold border-t border-sh pt-2"><span>Total ({count} bungkus)</span><span>{rp(total)}</span></p>
           <L t="Nama"><input className="inp" required maxLength="50" value={f.nama} onChange={on('nama')} /></L>
-          <L t="Nomor WhatsApp"><input className="inp" required inputMode="tel" placeholder="08xxxxxxxxxx" value={f.hp} onChange={on('hp')} /></L>
+          <L t="Email"><input className="inp" required type="email" maxLength="254" autoComplete="email" placeholder="nama@email.com" value={f.email} onChange={on('email')} /></L>
+          <L t="Nomor telepon"><input className="inp" required inputMode="tel" placeholder="08xxxxxxxxxx" value={f.hp} onChange={on('hp')} /></L>
+          <L t="Tanggal pesanan"><input className="inp" type="date" required value={f.tanggal} onChange={on('tanggal')} /></L>
+          <L t="Alamat (opsional)"><textarea className="inp" rows="2" maxLength="180" value={f.alamat} onChange={on('alamat')} /></L>
           <L t="Catatan (opsional)"><input className="inp" maxLength="120" placeholder="mis. ambil di kantin ITS" value={f.cat} onChange={on('cat')} /></L>
           <button className="btn w-full" disabled={busy}>{busy ? 'Mengirim…' : 'Kirim pesanan'}</button></>}
       </form>
@@ -84,19 +112,403 @@ function Shop({ catalog, run }) {
 
 /* ───────── KONSUMEN: lacak ───────── */
 function Track({ run }) {
-  const [f, setF] = useState({ no: '', hp: '' }), [o, setO] = useState(null);
-  const sub = async e => { e.preventDefault(); const r = await run('order.track', f); if (r) setO(r); };
+  const [f, setF] = useState({ no: '', email: '' }), [o, setO] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const lookup = async clear => {
+    setBusy(true); setError('');
+    if (clear) setO(null);
+    const r = await run('order.track', f);
+    setBusy(false);
+    if (r) setO(r);
+    else setError('Pesanan tidak ditemukan atau email tidak cocok. Pesanan lama tanpa email tidak dapat dilacak dengan cara ini.');
+  };
+  const sub = e => { e.preventDefault(); lookup(true); };
   const flow = ['baru', 'diproses', 'dikirim', 'selesai'];
   return <div className="max-w-xl mx-auto"><H>Lacak pesanan</H>
     <form onSubmit={sub} className="card grid sm:grid-cols-2 gap-3">
       <L t="Kode pesanan"><input className="inp" required placeholder="KC-0001" value={f.no} onChange={e => setF({ ...f, no: e.target.value })} /></L>
-      <L t="Nomor WhatsApp saat memesan"><input className="inp" required inputMode="tel" value={f.hp} onChange={e => setF({ ...f, hp: e.target.value })} /></L>
-      <div className="sm:col-span-2"><button className="btn">Cek status</button></div></form>
-    {o && <div className="card"><div className="flex justify-between items-center mb-3"><h3 className="text-3xl text-rd">{o.no}</h3><Pill k={o.status}>{STATUS[o.status]}</Pill></div>
-      {o.status !== 'batal' && <ol className="grid grid-cols-4 gap-1 text-center text-xs mb-4">{flow.map((s, i) => <li key={s} className={'rounded-lg py-2 ' + (i <= flow.indexOf(o.status) ? 'bg-rd text-cr font-semibold' : 'bg-cr')}>{STATUS[s]}</li>)}</ol>}
-      <ul className="text-sm space-y-1">{o.items.map(i => <li key={i.vid} className="flex justify-between"><span>{i.qty}× {i.nm}</span><span>{rp(i.qty * i.harga)}</span></li>)}</ul>
-      <p className="flex justify-between font-semibold border-t border-sh mt-2 pt-2"><span>Total</span><span>{rp(o.total)}</span></p>
-      <p className="text-xs mt-2">Dipesan {tgl(o.t)} atas nama {o.nama}</p></div>}
+      <L t="Email saat memesan"><input className="inp" required type="email" maxLength="254" autoComplete="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} /></L>
+      <div className="sm:col-span-2"><button className="btn" disabled={busy}>{busy ? 'Mencari pesanan…' : 'Cek status'}</button></div>
+      {error && <p role="alert" className="sm:col-span-2 text-sm text-rd">{error}</p>}</form>
+    {!o && !error && <p className="card text-sm">Masukkan nomor pesanan dan email yang digunakan saat checkout untuk melihat perkembangannya.</p>}
+    {o && <div className="card"><div className="flex flex-wrap justify-between items-center gap-3 mb-4"><div><p className="eyebrow">Detail pesanan</p><h3 className="text-3xl text-rd">{o.no}</h3></div><Pill k={o.status}>{STATUS[o.status]}</Pill></div>
+      <div className="flex justify-end mb-3"><button className="btn-g btn-sm" disabled={busy} onClick={() => lookup(false)}>{busy ? 'Memperbarui…' : 'Perbarui status'}</button></div>
+      <div className="grid sm:grid-cols-2 gap-3 mb-4 text-sm"><p><span className="block text-xs opacity-70">Nama konsumen</span><b>{o.nama}</b></p><p><span className="block text-xs opacity-70">Tanggal pesanan</span><b>{o.tanggal || tgl(o.t)}</b></p><p><span className="block text-xs opacity-70">Terakhir diperbarui</span><b>{tgl(o.hist?.[o.hist.length - 1]?.t || o.t)}</b></p></div>
+      {o.status === 'batal' ? <p className="rounded-xl bg-red-100 p-3 text-sm text-rd font-semibold">Pesanan ini dibatalkan.</p> : <ol className="tracking-timeline mb-5">{flow.map((s, i) => {
+        const current = flow.indexOf(o.status), reached = current >= i;
+        return <li key={s} className={reached ? 'reached' : ''}><span>{reached ? '✓' : i + 1}</span><b>{i === 0 ? 'Pesanan Dibuat' : STATUS[s]}</b></li>;
+      })}</ol>}
+      <div className="text-sm space-y-2">{o.items.map(i => <div key={i.vid} className="flex justify-between gap-3"><span>{i.qty} × {i.nm}<small className="block text-xs opacity-70">{rp(i.harga)} per item</small></span><b>{rp(i.qty * i.harga)}</b></div>)}</div>
+      <p className="flex justify-between font-semibold border-t border-sh mt-3 pt-3"><span>Total pesanan</span><span>{rp(o.total)}</span></p>
+      <div className="mt-5 border-t border-sh pt-4"><h4 className="font-semibold mb-2">Riwayat status</h4>{o.hist?.length ? <ol className="space-y-2 text-sm">{o.hist.map((item, index) => <li key={`${item.status}-${item.t}-${index}`} className="flex justify-between gap-3"><span><Pill k={item.status}>{STATUS[item.status]}</Pill></span><time className="text-xs">{tgl(item.t)}</time></li>)}</ol> : <p className="text-sm">Belum ada riwayat status.</p>}</div>
+    </div>}
+  </div>;
+}
+
+function DemoStories({ catalog }) {
+  const activeVariants = catalog.filter(variant => variant.aktif !== false);
+  const demoTime = new Date().toISOString();
+  const firstVariant = activeVariants[0];
+  const [orders, setOrders] = useState([{
+    id: 'demo-1',
+    no: 'DEMO-0001',
+    nama: 'Mitra Contoh',
+    tanggal: localDate(),
+    cat: 'Pesanan simulasi untuk demonstrasi.',
+    t: demoTime,
+    status: 'diproses',
+    hist: [{ status: 'baru', t: demoTime }, { status: 'diproses', t: demoTime }],
+    items: firstVariant ? [{ vid: firstVariant.id, nm: nm(firstVariant), qty: 2, harga: firstVariant.harga }] : [],
+  }]);
+  const [selectedId, setSelectedId] = useState('demo-1');
+  const [story, setStory] = useState('US-01');
+  const [orderForm, setOrderForm] = useState({ nama: '', tanggal: localDate(), cat: '' });
+  const [itemForm, setItemForm] = useState({ vid: firstVariant?.id || '', qty: '1' });
+  const [itemError, setItemError] = useState('');
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [notice, setNotice] = useState('');
+  const [demoProducts, setDemoProducts] = useState(() => catalog.map(variant => ({ ...variant })));
+  const [productForm, setProductForm] = useState({ produk: '', varian: '', ukuran: '', harga: '', min: '', awal: '0' });
+  const [stockForm, setStockForm] = useState({ vid: firstVariant?.id || '', jenis: 'masuk', jumlah: '1', oleh: 'Admin demo' });
+  const [demoStockLog, setDemoStockLog] = useState([]);
+  const [demoPartners, setDemoPartners] = useState([]);
+  const [partnerForm, setPartnerForm] = useState({ nama: '', lokasi: '' });
+  const [shipForm, setShipForm] = useState({ mid: '', vid: firstVariant?.id || '', qty: '1' });
+  const [saleForm, setSaleForm] = useState({ vid: firstVariant?.id || '', qty: '1', lokasi: 'Penjualan langsung' });
+  const [saleCart, setSaleCart] = useState([]);
+  const [demoSales, setDemoSales] = useState([]);
+  const selected = orders.find(order => order.id === selectedId);
+  const orderTotal = order => order.items.reduce((sum, item) => sum + item.qty * item.harga, 0);
+  const selectedItems = selected?.items || [];
+  const selectedTotal = selected ? orderTotal(selected) : 0;
+  const stories = [
+    ['US-01', 'Produk & varian'],
+    ['US-02', 'Stok'],
+    ['US-03', 'Mitra'],
+    ['US-04', 'Penjualan'],
+    ['US-05', 'Laporan'],
+    ['US-06a', 'Data pesanan'],
+    ['US-06b', 'Item pesanan'],
+    ['US-07', 'Status'],
+    ['US-08', 'Daftar & detail'],
+    ['US-09', 'Kuantitas & subtotal'],
+    ['US-10', 'Cari & filter'],
+  ];
+  const updateSelected = update => setOrders(current => current.map(order => order.id === selectedId ? update(order) : order));
+  const createOrder = event => {
+    event.preventDefault();
+    const now = new Date().toISOString();
+    const next = {
+      id: `demo-${Date.now()}`,
+      no: `DEMO-${String(orders.length + 1).padStart(4, '0')}`,
+      nama: orderForm.nama.trim(),
+      tanggal: orderForm.tanggal,
+      cat: orderForm.cat.trim(),
+      t: now,
+      status: 'baru',
+      hist: [{ status: 'baru', t: now }],
+      items: [],
+    };
+    setOrders(current => [...current, next]);
+    setSelectedId(next.id);
+    setOrderForm({ nama: '', tanggal: localDate(), cat: '' });
+    setNotice(`${next.no} ditambahkan ke simulasi.`);
+  };
+  const addItem = event => {
+    event.preventDefault();
+    const variant = activeVariants.find(item => item.id === itemForm.vid);
+    const qty = Number(itemForm.qty);
+    if (!selected) return;
+    if (!variant) { setItemError('Pilih varian aktif yang tersedia.'); return; }
+    if (!Number.isInteger(qty) || qty <= 0) { setItemError('Kuantitas harus bilangan bulat lebih dari nol.'); return; }
+    updateSelected(order => {
+      const existing = order.items.find(item => item.vid === variant.id);
+      const items = existing
+        ? order.items.map(item => item.vid === variant.id ? { ...item, qty: item.qty + qty } : item)
+        : [...order.items, { vid: variant.id, nm: nm(variant), qty, harga: variant.harga }];
+      return { ...order, items };
+    });
+    setItemError('');
+    setNotice('Item demo ditambahkan; subtotal dan total dihitung ulang.');
+  };
+  const updateQuantity = (vid, value) => {
+    const qty = Number(value);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      setItemError('Kuantitas harus bilangan bulat lebih dari nol.');
+      return;
+    }
+    updateSelected(order => ({ ...order, items: order.items.map(item => item.vid === vid ? { ...item, qty } : item) }));
+    setItemError('');
+  };
+  const removeItem = vid => updateSelected(order => ({ ...order, items: order.items.filter(item => item.vid !== vid) }));
+  const changeStatus = nextStatus => {
+    if (!selected || !(NEXT[selected.status] || []).includes(nextStatus)) return;
+    const now = new Date().toISOString();
+    updateSelected(order => ({ ...order, status: nextStatus, hist: [...order.hist, { status: nextStatus, t: now }] }));
+    setNotice(`Status simulasi diperbarui menjadi ${STATUS[nextStatus]}.`);
+  };
+  const resetFilters = () => { setSearch(''); setStatusFilter(''); setDateFilter(''); };
+  const updateDemoStock = (vid, delta, jenis, cat) => {
+    const now = new Date().toISOString();
+    const variant = demoProducts.find(item => item.id === vid);
+    if (!variant) return false;
+    const after = variant.stok + delta;
+    if (after < 0) return false;
+    setDemoProducts(current => current.map(item => item.id === vid ? { ...item, stok: after } : item));
+    setDemoStockLog(current => [{ id: `${Date.now()}-${Math.random()}`, vid, jenis, jumlah: delta, setelah: after, t: now, oleh: stockForm.oleh || 'Admin demo', cat }, ...current]);
+    return true;
+  };
+  const saveDemoProduct = event => {
+    event.preventDefault();
+    const values = {
+      produk: productForm.produk.trim(),
+      varian: productForm.varian.trim(),
+      ukuran: productForm.ukuran.trim(),
+      harga: Number(productForm.harga),
+      min: Number(productForm.min),
+      stok: Number(productForm.awal) || 0,
+      aktif: true,
+    };
+    if (!values.produk || !values.varian || !values.ukuran || !Number.isFinite(values.harga) || values.harga < 0
+      || !Number.isInteger(values.min) || values.min < 0 || !Number.isInteger(values.stok) || values.stok < 0) {
+      setNotice('Lengkapi data produk dengan harga, minimum stok, dan stok awal yang valid.');
+      return;
+    }
+    const productKey = item => `${item.produk}|${item.varian}|${item.ukuran}`.toLowerCase();
+    if (demoProducts.some(item => productKey(item) === productKey(values))) {
+      setNotice('Produk dan varian dengan ukuran tersebut sudah ada.');
+      return;
+    }
+    const variant = { id: `demo-product-${Date.now()}`, ...values };
+    setDemoProducts(current => [...current, variant]);
+    if (values.stok > 0) setDemoStockLog(current => [{ id: `${Date.now()}-initial`, vid: variant.id, jenis: 'awal', jumlah: values.stok, setelah: values.stok, t: new Date().toISOString(), oleh: 'Admin demo', cat: 'Stok awal' }, ...current]);
+    setProductForm({ produk: '', varian: '', ukuran: '', harga: '', min: '', awal: '0' });
+    setNotice(`${nm(variant)} ditambahkan ke katalog.`);
+  };
+  const updateDemoProduct = (id, changes) => setDemoProducts(current => current.map(item => item.id === id ? { ...item, ...changes } : item));
+  const recordDemoStock = event => {
+    event.preventDefault();
+    const variant = demoProducts.find(item => item.id === stockForm.vid && item.aktif !== false);
+    const qty = Number(stockForm.jumlah);
+    if (!variant || !Number.isInteger(qty) || qty < (stockForm.jenis === 'sesuai' ? 0 : 1)) {
+      setNotice('Pilih varian aktif dan masukkan jumlah stok yang valid.');
+      return;
+    }
+    const delta = stockForm.jenis === 'masuk' || stockForm.jenis === 'awal' ? qty : stockForm.jenis === 'keluar' ? -qty : qty - variant.stok;
+    if (variant.stok + delta < 0) {
+      setNotice('Stok keluar melebihi jumlah stok yang tersedia.');
+      return;
+    }
+    updateDemoStock(variant.id, delta, stockForm.jenis, 'Perubahan stok');
+    setNotice('Perubahan stok dicatat.');
+  };
+  const addDemoPartner = event => {
+    event.preventDefault();
+    const nama = partnerForm.nama.trim();
+    if (!nama) return;
+    const partner = { id: `demo-partner-${Date.now()}`, nama, lokasi: partnerForm.lokasi.trim(), stok: {} };
+    setDemoPartners(current => [...current, partner]);
+    setShipForm(current => ({ ...current, mid: partner.id }));
+    setPartnerForm({ nama: '', lokasi: '' });
+    setNotice(`${nama} ditambahkan sebagai mitra.`);
+  };
+  const shipDemoStock = event => {
+    event.preventDefault();
+    const qty = Number(shipForm.qty);
+    const partner = demoPartners.find(item => item.id === shipForm.mid);
+    const variant = demoProducts.find(item => item.id === shipForm.vid && item.aktif !== false);
+    if (!partner || !variant || !Number.isInteger(qty) || qty <= 0 || qty > variant.stok) {
+      setNotice('Pilih mitra dan varian aktif; jumlah kirim harus tersedia di stok pusat.');
+      return;
+    }
+    if (!updateDemoStock(variant.id, -qty, 'mitra', `Dikirim ke ${partner.nama}`)) return;
+    setDemoPartners(current => current.map(item => item.id === partner.id ? { ...item, stok: { ...item.stok, [variant.id]: (item.stok[variant.id] || 0) + qty } } : item));
+    setNotice(`${qty} unit dikirim ke ${partner.nama}.`);
+  };
+  const addSaleLine = event => {
+    event.preventDefault();
+    const qty = Number(saleForm.qty);
+    const variant = demoProducts.find(item => item.id === saleForm.vid && item.aktif !== false);
+    const alreadyAdded = saleCart.filter(item => item.vid === saleForm.vid).reduce((sum, item) => sum + item.qty, 0);
+    if (!variant || !Number.isInteger(qty) || qty <= 0 || qty + alreadyAdded > variant.stok) {
+      setNotice('Kuantitas penjualan harus lebih dari nol dan tidak melebihi stok tersedia.');
+      return;
+    }
+    setSaleCart(current => {
+      const existing = current.find(item => item.vid === variant.id);
+      return existing
+        ? current.map(item => item.vid === variant.id ? { ...item, qty: item.qty + qty } : item)
+        : [...current, { vid: variant.id, nm: nm(variant), qty, harga: variant.harga }];
+    });
+    setNotice('Item ditambahkan ke transaksi.');
+  };
+  const completeDemoSale = () => {
+    if (!saleCart.length) { setNotice('Tambahkan minimal satu item ke transaksi.'); return; }
+    if (saleCart.some(item => item.qty > (demoProducts.find(variant => variant.id === item.vid)?.stok || 0))) {
+      setNotice('Stok berubah dan tidak mencukupi. Periksa kembali item transaksi.');
+      return;
+    }
+    const now = new Date().toISOString();
+    saleCart.forEach(item => updateDemoStock(item.vid, -item.qty, 'cfd', saleForm.lokasi.trim() || 'Penjualan langsung'));
+    setDemoSales(current => [...current, { id: `demo-sale-${Date.now()}`, t: now, ref: saleForm.lokasi.trim() || 'Penjualan langsung', items: saleCart, total: saleCart.reduce((sum, item) => sum + item.qty * item.harga, 0) }]);
+    setSaleCart([]);
+    setNotice('Penjualan dicatat dan stok diperbarui.');
+  };
+  const filteredOrders = [...orders].reverse().filter(order =>
+    (!search || order.no.toLowerCase().includes(search.trim().toLowerCase()) || order.nama.toLowerCase().includes(search.trim().toLowerCase()))
+    && (!statusFilter || order.status === statusFilter)
+    && (!dateFilter || order.tanggal === dateFilter));
+  const renderOrderList = () => <section className="card">
+    <div className="flex flex-wrap justify-between items-center gap-2 mb-3"><h3 className="text-xl text-rd">Daftar pesanan demo</h3><span className="text-xs">{filteredOrders.length} pesanan</span></div>
+    {!filteredOrders.length ? <Empty>Tidak ada pesanan demo yang cocok.</Empty> : <div className="space-y-2">{filteredOrders.map(order => <button key={order.id} type="button" className="demo-order-row" onClick={() => setSelectedId(order.id)}>
+      <span><b>{order.no} · {order.nama}</b><small>{order.tanggal} · {order.items.length} jenis item</small></span><Pill k={order.status}>{STATUS[order.status]}</Pill>
+    </button>)}</div>}
+  </section>;
+  const renderOrderDetail = order => <section className="card">
+    <div className="flex flex-wrap justify-between items-center gap-2 mb-3"><div><p className="eyebrow">Detail simulasi</p><h3 className="text-2xl text-rd">{order.no}</h3></div><Pill k={order.status}>{STATUS[order.status]}</Pill></div>
+    <div className="grid sm:grid-cols-2 gap-3 text-sm"><p><small className="block opacity-70">Mitra/pelanggan</small><b>{order.nama}</b></p><p><small className="block opacity-70">Tanggal pesanan</small><b>{order.tanggal}</b></p></div>
+    <p className="text-sm mt-3"><small className="block opacity-70">Catatan</small>{order.cat || 'Tidak ada catatan.'}</p>
+    <div className="mt-4 border-t border-sh pt-3"><h4 className="font-semibold mb-2">Item pesanan</h4>{order.items.length ? order.items.map(item => <div key={item.vid} className="flex justify-between gap-3 py-1 text-sm"><span>{item.qty} × {item.nm}</span><b>{rp(item.qty * item.harga)}</b></div>) : <p className="text-sm">Belum ada item pada pesanan ini.</p>}</div>
+    <p className="flex justify-between border-t border-sh mt-2 pt-3 font-semibold"><span>Total</span><span>{rp(orderTotal(order))}</span></p>
+  </section>;
+  const renderItems = allowQuantityEdit => <section className="card">
+    <div className="flex flex-wrap justify-between items-center gap-2 mb-3"><h3 className="text-xl text-rd">Item · {selected?.no}</h3><label className="lbl">Pesanan<select className="inp" value={selectedId} onChange={event => setSelectedId(event.target.value)}>{orders.map(order => <option key={order.id} value={order.id}>{order.no} · {order.nama}</option>)}</select></label></div>
+    <p className="text-xs mb-3">Pilihan hanya memuat varian aktif dari katalog saat ini.</p>
+    <form onSubmit={addItem} className="grid sm:grid-cols-[minmax(0,1fr)_8rem_auto] gap-3 items-end">
+      <L t="Produk / varian"><select className="inp" required value={itemForm.vid} onChange={event => setItemForm(current => ({ ...current, vid: event.target.value }))}><option value="">Pilih varian aktif</option>{activeVariants.map(variant => <option key={variant.id} value={variant.id}>{nm(variant)} · {rp(variant.harga)}</option>)}</select></L>
+      <L t="Kuantitas"><input className="inp" type="number" min="1" step="1" required value={itemForm.qty} onChange={event => setItemForm(current => ({ ...current, qty: event.target.value }))} /></L>
+      <button className="btn" disabled={!selected || !activeVariants.length}>Tambah item</button>
+    </form>
+    {!activeVariants.length && <p className="mt-2 text-sm text-rd">Belum ada varian aktif di katalog.</p>}
+    {itemError && <p role="alert" className="mt-2 text-sm text-rd">{itemError}</p>}
+    {selected && <div className="mt-4">{selectedItems.length ? <Tbl head={['Item', 'Harga satuan', 'Kuantitas', 'Subtotal', '']}>{selectedItems.map(item => <tr key={item.vid}>
+      <td className="td">{item.nm}</td><td className="td">{rp(item.harga)}</td>
+      <td className="td">{allowQuantityEdit ? <input className="inp !mt-0 w-20" type="number" min="1" step="1" value={item.qty} onChange={event => updateQuantity(item.vid, event.target.value)} aria-label={`Kuantitas ${item.nm}`} /> : item.qty}</td>
+      <td className="td font-semibold">{rp(item.qty * item.harga)}</td><td className="td"><button type="button" className="btn-g btn-sm" onClick={() => removeItem(item.vid)}>Hapus</button></td>
+    </tr>)}</Tbl> : <Empty>Tambahkan satu atau beberapa item untuk melanjutkan simulasi.</Empty>}
+      <p className="flex justify-between border-t border-sh mt-3 pt-3 font-semibold"><span>Total pesanan</span><span>{rp(selectedTotal)}</span></p>
+    </div>}
+  </section>;
+  const renderStatus = () => selected && <section className="card">
+    <div className="flex flex-wrap justify-between items-center gap-2 mb-4"><div><p className="eyebrow">US-07 · Riwayat status</p><h3 className="text-2xl text-rd">{selected.no}</h3></div><Pill k={selected.status}>{STATUS[selected.status]}</Pill></div>
+    <p className="text-sm mb-3">Perubahan status demo mencatat waktu. Status Selesai tidak memiliki transisi kembali.</p>
+    <div className="flex flex-wrap gap-2 mb-4">{(NEXT[selected.status] || []).map(next => <button key={next} type="button" className={next === 'batal' ? 'btn-g' : 'btn'} onClick={() => changeStatus(next)}>{next === 'diproses' ? 'Proses' : next === 'dikirim' ? 'Siap Dikirim' : next === 'selesai' ? 'Selesai' : 'Batalkan'}</button>)}
+      {!NEXT[selected.status]?.length && <span className="text-sm">Tidak ada perubahan status berikutnya.</span>}
+    </div>
+    <h4 className="font-semibold mb-2">Riwayat perubahan</h4><ol className="space-y-2 text-sm">{selected.hist.map((entry, index) => <li key={`${entry.status}-${entry.t}-${index}`} className="flex justify-between gap-3"><Pill k={entry.status}>{STATUS[entry.status]}</Pill><time>{tgl(entry.t)}</time></li>)}</ol>
+  </section>;
+  const renderSearch = () => <section className="card">
+    <h3 className="text-xl text-rd mb-3">Cari dan filter · US-10</h3>
+    <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+      <L t="Nama mitra/pelanggan"><input className="inp" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari nama atau nomor demo" /></L>
+      <L t="Status"><select className="inp" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="">Semua status</option>{Object.entries(STATUS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></L>
+      <L t="Tanggal"><input className="inp" type="date" value={dateFilter} onChange={event => setDateFilter(event.target.value)} /></L>
+      <button type="button" className="btn-g" onClick={resetFilters}>Reset filter</button>
+    </div>
+    <p className="text-xs mt-3">{filteredOrders.length} dari {orders.length} pesanan demo</p>
+    <div className="mt-3 space-y-2">{filteredOrders.map(order => <button key={order.id} type="button" className="demo-order-row" onClick={() => setSelectedId(order.id)}><span><b>{order.no} · {order.nama}</b><small>{order.tanggal}</small></span><Pill k={order.status}>{STATUS[order.status]}</Pill></button>)}</div>
+  </section>;
+  const renderProductsDemo = () => <div className="grid lg:grid-cols-2 gap-4">
+    <form className="card space-y-3" onSubmit={saveDemoProduct}><p className="eyebrow">US-01 · Katalog</p><h3 className="text-xl text-rd">Tambah produk dan varian</h3>
+      <L t="Nama produk"><input className="inp" required maxLength="40" value={productForm.produk} onChange={event => setProductForm(current => ({ ...current, produk: event.target.value }))} /></L>
+      <L t="Varian rasa"><input className="inp" required maxLength="40" value={productForm.varian} onChange={event => setProductForm(current => ({ ...current, varian: event.target.value }))} /></L>
+      <div className="grid sm:grid-cols-2 gap-3"><L t="Ukuran"><input className="inp" required maxLength="30" value={productForm.ukuran} onChange={event => setProductForm(current => ({ ...current, ukuran: event.target.value }))} /></L>
+        <L t="Harga (Rp)"><input className="inp" type="number" min="0" required value={productForm.harga} onChange={event => setProductForm(current => ({ ...current, harga: event.target.value }))} /></L>
+        <L t="Minimum stok"><input className="inp" type="number" min="0" required value={productForm.min} onChange={event => setProductForm(current => ({ ...current, min: event.target.value }))} /></L>
+        <L t="Stok awal"><input className="inp" type="number" min="0" required value={productForm.awal} onChange={event => setProductForm(current => ({ ...current, awal: event.target.value }))} /></L></div>
+      <button className="btn">Tambah varian</button>
+    </form>
+    <section className="card"><p className="eyebrow">Katalog produk</p><h3 className="text-xl text-rd mb-3">{demoProducts.length} varian</h3>
+      {demoProducts.length ? <div className="space-y-2">{demoProducts.map(item => <div key={item.id} className="demo-order-row"><span><b>{nm(item)}</b><small>{rp(item.harga)} · stok {item.stok} · min. {item.min}</small></span><span className="flex items-center gap-2"><Pill k={item.aktif ? 'aman' : 'off'}>{item.aktif ? 'Aktif' : 'Nonaktif'}</Pill><button type="button" className="btn-g btn-sm" onClick={() => updateDemoProduct(item.id, { aktif: !item.aktif })}>{item.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button></span></div>)}</div> : <Empty>Katalog produk masih kosong.</Empty>}
+    </section>
+  </div>;
+  const renderStockDemo = () => <div className="grid lg:grid-cols-2 gap-4">
+    <form className="card space-y-3" onSubmit={recordDemoStock}><p className="eyebrow">US-02 · Persediaan</p><h3 className="text-xl text-rd">Catat perubahan stok</h3>
+      <L t="Varian"><select className="inp" required value={stockForm.vid} onChange={event => setStockForm(current => ({ ...current, vid: event.target.value }))}><option value="">Pilih varian aktif</option>{demoProducts.filter(item => item.aktif !== false).map(item => <option key={item.id} value={item.id}>{nm(item)} · stok {item.stok}</option>)}</select></L>
+      <L t="Jenis perubahan"><select className="inp" value={stockForm.jenis} onChange={event => setStockForm(current => ({ ...current, jenis: event.target.value }))}><option value="masuk">Stok masuk</option><option value="keluar">Stok keluar</option><option value="awal">Stok awal</option><option value="sesuai">Penyesuaian stok fisik</option></select></L>
+      <div className="grid sm:grid-cols-2 gap-3"><L t={stockForm.jenis === 'sesuai' ? 'Jumlah stok fisik' : 'Jumlah unit'}><input className="inp" type="number" min={stockForm.jenis === 'sesuai' ? '0' : '1'} step="1" required value={stockForm.jumlah} onChange={event => setStockForm(current => ({ ...current, jumlah: event.target.value }))} /></L><L t="Dicatat oleh"><input className="inp" required value={stockForm.oleh} onChange={event => setStockForm(current => ({ ...current, oleh: event.target.value }))} /></L></div>
+      <button className="btn">Simpan perubahan stok</button>
+    </form>
+    <section className="card"><p className="eyebrow">Ringkasan stok</p><h3 className="text-xl text-rd mb-3">Posisi persediaan</h3>
+      {demoProducts.length ? <div className="space-y-2">{demoProducts.map(item => <div key={item.id} className="demo-order-row"><span><b>{nm(item)}</b><small>Batas minimum {item.min}</small></span><Pill k={stat(item)}>{item.stok} unit · {LB[stat(item)]}</Pill></div>)}</div> : <Empty>Belum ada produk di katalog.</Empty>}
+      <div className="mt-4 border-t border-sh pt-3"><h4 className="font-semibold mb-2">Riwayat perubahan stok</h4>{demoStockLog.length ? <div className="space-y-2 text-sm">{demoStockLog.slice(0, 5).map(log => <p key={log.id} className="flex justify-between gap-2"><span>{nm(demoProducts.find(item => item.id === log.vid) || { produk: 'Produk', varian: 'dihapus', ukuran: '' })}<small className="block text-xs opacity-70">{JENIS[log.jenis]} · {tgl(log.t)}</small></span><b>{log.jumlah > 0 ? '+' : ''}{log.jumlah} → {log.setelah}</b></p>)}</div> : <Empty>Belum ada perubahan stok dalam demo ini.</Empty>}</div>
+    </section>
+  </div>;
+  const renderPartnersDemo = () => <div className="grid lg:grid-cols-2 gap-4">
+    <div className="space-y-4">
+      <form className="card space-y-3" onSubmit={addDemoPartner}><p className="eyebrow">US-03 · Mitra</p><h3 className="text-xl text-rd">Daftarkan mitra</h3>
+        <L t="Nama mitra"><input className="inp" required maxLength="40" value={partnerForm.nama} onChange={event => setPartnerForm(current => ({ ...current, nama: event.target.value }))} /></L>
+        <L t="Lokasi"><input className="inp" maxLength="60" value={partnerForm.lokasi} onChange={event => setPartnerForm(current => ({ ...current, lokasi: event.target.value }))} /></L>
+        <button className="btn">Tambah mitra</button>
+      </form>
+      {demoPartners.map(partner => <section className="card" key={partner.id}><h3 className="text-xl text-rd">{partner.nama}</h3><p className="text-sm mb-3">{partner.lokasi || 'Lokasi belum diisi'}</p><p className="text-sm font-semibold">Stok konsinyasi</p>
+        {Object.keys(partner.stok).length ? Object.entries(partner.stok).map(([vid, qty]) => <p key={vid} className="flex justify-between text-sm py-1"><span>{nm(demoProducts.find(item => item.id === vid) || { produk: 'Produk', varian: 'tidak tersedia', ukuran: '' })}</span><b>{qty} unit</b></p>) : <p className="text-sm opacity-70">Belum menerima stok.</p>}
+      </section>)}
+      {!demoPartners.length && <section className="card"><Empty>Tambahkan mitra untuk melihat data dan stok konsinyasi.</Empty></section>}
+    </div>
+    <form className="card space-y-3" onSubmit={shipDemoStock}><p className="eyebrow">Distribusi stok</p><h3 className="text-xl text-rd">Kirim stok ke mitra</h3>
+      <L t="Mitra"><select className="inp" required value={shipForm.mid} onChange={event => setShipForm(current => ({ ...current, mid: event.target.value }))}><option value="">Pilih mitra</option>{demoPartners.map(partner => <option key={partner.id} value={partner.id}>{partner.nama}</option>)}</select></L>
+      <L t="Produk / varian"><select className="inp" required value={shipForm.vid} onChange={event => setShipForm(current => ({ ...current, vid: event.target.value }))}><option value="">Pilih varian aktif</option>{demoProducts.filter(item => item.aktif !== false).map(item => <option key={item.id} value={item.id}>{nm(item)} · stok {item.stok}</option>)}</select></L>
+      <L t="Jumlah dikirim"><input className="inp" type="number" min="1" step="1" required value={shipForm.qty} onChange={event => setShipForm(current => ({ ...current, qty: event.target.value }))} /></L>
+      <button className="btn" disabled={!demoPartners.length}>Kirim stok</button>
+    </form>
+  </div>;
+  const renderSalesDemo = () => <div className="grid lg:grid-cols-2 gap-4">
+    <div className="card"><p className="eyebrow">US-04 · Penjualan</p><h3 className="text-xl text-rd mb-3">Catat penjualan langsung</h3>
+      <form onSubmit={addSaleLine} className="space-y-3">
+        <L t="Produk / varian"><select className="inp" required value={saleForm.vid} onChange={event => setSaleForm(current => ({ ...current, vid: event.target.value }))}><option value="">Pilih varian aktif</option>{demoProducts.filter(item => item.aktif !== false).map(item => <option key={item.id} value={item.id}>{nm(item)} · stok {item.stok}</option>)}</select></L>
+        <L t="Kuantitas"><input className="inp" type="number" min="1" step="1" required value={saleForm.qty} onChange={event => setSaleForm(current => ({ ...current, qty: event.target.value }))} /></L>
+        <button className="btn">Tambah item</button>
+      </form>
+      <L t="Lokasi / kanal" c="mt-3"><input className="inp" value={saleForm.lokasi} onChange={event => setSaleForm(current => ({ ...current, lokasi: event.target.value }))} /></L>
+      <div className="mt-4 border-t border-sh pt-3"><h4 className="font-semibold mb-2">Item transaksi</h4>{saleCart.length ? saleCart.map(item => <div key={item.vid} className="flex justify-between gap-3 py-1 text-sm"><span>{item.qty} × {item.nm}<small className="block text-xs opacity-70">{rp(item.harga)} per item</small></span><span className="flex items-center gap-2"><b>{rp(item.qty * item.harga)}</b><button type="button" className="btn-g btn-sm" onClick={() => setSaleCart(current => current.filter(line => line.vid !== item.vid))}>Hapus</button></span></div>) : <Empty>Belum ada item transaksi.</Empty>}
+        <p className="flex justify-between border-t border-sh mt-2 pt-3 font-semibold"><span>Total</span><span>{rp(saleCart.reduce((sum, item) => sum + item.qty * item.harga, 0))}</span></p>
+        <button type="button" className="btn mt-3" disabled={!saleCart.length} onClick={completeDemoSale}>Simpan penjualan</button>
+      </div>
+    </div>
+    <section className="card"><p className="eyebrow">Riwayat penjualan</p><h3 className="text-xl text-rd mb-3">{demoSales.length} transaksi</h3>{demoSales.length ? <div className="space-y-2">{[...demoSales].reverse().map(sale => <div className="demo-order-row" key={sale.id}><span><b>{sale.ref}</b><small>{tgl(sale.t)} · {sale.items.reduce((sum, item) => sum + item.qty, 0)} unit</small></span><b>{rp(sale.total)}</b></div>)}</div> : <Empty>Belum ada transaksi penjualan di demo.</Empty>}</section>
+  </div>;
+  const renderReportsDemo = () => {
+    const revenue = demoSales.reduce((sum, sale) => sum + sale.total, 0);
+    const unitsSold = demoSales.reduce((sum, sale) => sum + sale.items.reduce((total, item) => total + item.qty, 0), 0);
+    const rankings = {};
+    demoSales.forEach(sale => sale.items.forEach(item => {
+      rankings[item.nm] = rankings[item.nm] || { qty: 0, revenue: 0 };
+      rankings[item.nm].qty += item.qty;
+      rankings[item.nm].revenue += item.qty * item.harga;
+    }));
+    const topProducts = Object.entries(rankings).sort((a, b) => b[1].qty - a[1].qty);
+    return <div className="space-y-4"><section className="card"><p className="eyebrow">US-05 · Ringkasan</p><h3 className="text-xl text-rd mb-3">Laporan penjualan dan stok</h3>
+      <div className="grid sm:grid-cols-3 gap-3"><div className="rounded-xl bg-cr p-4"><small>Total transaksi</small><b className="block text-2xl">{demoSales.length}</b></div><div className="rounded-xl bg-cr p-4"><small>Unit terjual</small><b className="block text-2xl">{unitsSold}</b></div><div className="rounded-xl bg-cr p-4"><small>Omzet tercatat</small><b className="block text-2xl">{rp(revenue)}</b></div></div>
+    </section>
+      <div className="grid lg:grid-cols-2 gap-4"><section className="card"><h3 className="text-xl text-rd mb-3">Produk terlaris</h3>{topProducts.length ? <div className="space-y-2">{topProducts.map(([name, value]) => <div className="demo-order-row" key={name}><span><b>{name}</b><small>{value.qty} unit terjual</small></span><b>{rp(value.revenue)}</b></div>)}</div> : <Empty>Belum ada transaksi untuk diringkas.</Empty>}</section>
+        <section className="card"><h3 className="text-xl text-rd mb-3">Kondisi stok</h3>{demoProducts.length ? <div className="space-y-2">{demoProducts.map(item => <div className="demo-order-row" key={item.id}><span><b>{nm(item)}</b><small>Minimum {item.min}</small></span><Pill k={stat(item)}>{item.stok} unit · {LB[stat(item)]}</Pill></div>)}</div> : <Empty>Belum ada data produk.</Empty>}</section>
+      </div>
+    </div>;
+  };
+  return <div>
+    <H>Demo User Story KUNCI</H>
+    <div className="demo-story-tabs" role="tablist" aria-label="Demo user story KUNCI">{stories.map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={story === key} className={story === key ? 'active' : ''} onClick={() => { setStory(key); setNotice(''); }}>{key} · {label}</button>)}</div>
+    {notice && <p className="demo-notice" role="status">{notice}</p>}
+    {story === 'US-01' && renderProductsDemo()}
+    {story === 'US-02' && renderStockDemo()}
+    {story === 'US-03' && renderPartnersDemo()}
+    {story === 'US-04' && renderSalesDemo()}
+    {story === 'US-05' && renderReportsDemo()}
+    {story === 'US-06a' && <div className="grid lg:grid-cols-2 gap-4">
+      <form className="card space-y-3" onSubmit={createOrder}><p className="eyebrow">US-06a · 2 poin</p><h3 className="text-xl text-rd">Data pesanan</h3>
+        <L t="Nama mitra/pelanggan"><input className="inp" required maxLength="50" value={orderForm.nama} onChange={event => setOrderForm(current => ({ ...current, nama: event.target.value }))} /></L>
+        <L t="Tanggal pesanan"><input className="inp" required type="date" value={orderForm.tanggal} onChange={event => setOrderForm(current => ({ ...current, tanggal: event.target.value }))} /></L>
+        <L t="Catatan"><textarea className="inp" rows="3" maxLength="120" value={orderForm.cat} onChange={event => setOrderForm(current => ({ ...current, cat: event.target.value }))} /></L>
+        <button className="btn">Buat pesanan demo</button>
+      </form>{renderOrderList()}
+    </div>}
+    {story === 'US-06b' && renderItems(false)}
+    {story === 'US-07' && <div className="grid lg:grid-cols-2 gap-4">{renderOrderList()}{renderStatus()}</div>}
+    {story === 'US-08' && <div className="grid lg:grid-cols-2 gap-4">{renderOrderList()}{selected ? renderOrderDetail(selected) : <Empty>Pilih pesanan demo untuk melihat detail.</Empty>}</div>}
+    {story === 'US-09' && renderItems(true)}
+    {story === 'US-10' && <div className="grid lg:grid-cols-2 gap-4">{renderSearch()}{selected ? renderOrderDetail(selected) : <Empty>Pilih pesanan dari hasil pencarian untuk melihat detail.</Empty>}</div>}
   </div>;
 }
 
@@ -137,17 +549,91 @@ function Ringkasan({ d, go }) {
       {w.length ? w.map(x => <div key={x.id} className="flex flex-wrap justify-between gap-2 items-center py-2 border-t border-dashed border-sh first:border-0"><div><b>{nm(x)}</b><br /><span className="text-sm">Stok {x.stok} · batas minimum {x.min}</span></div><Pill k={stat(x)}>{LB[stat(x)]}</Pill></div>) : <Empty>Semua varian di atas batas minimum.</Empty>}</div></>;
 }
 
-function Pesanan({ d, run }) {
-  const [fl, setFl] = useState('baru'), BL = { diproses: 'Proses', dikirim: 'Tandai dikirim', selesai: 'Selesai', batal: 'Batalkan' };
-  const list = [...d.o].reverse().filter(o => !fl || o.status === fl);
-  const chg = (o, s) => { if (s === 'batal' && !confirm(`Batalkan ${o.no}? Stok akan dikembalikan.`)) return; run('order.status', { id: o.id, status: s }, 'Status diperbarui.'); };
+function Pesanan({ d, run, notify, pin }) {
+  const [fl, setFl] = useState(''), [query, setQuery] = useState(''), [from, setFrom] = useState(''), [to, setTo] = useState(''), [selectedId, setSelectedId] = useState(null), [emailState, setEmailState] = useState({});
+  const modalRef = useRef(null);
+  const BL = { diproses: 'Proses', dikirim: 'Tandai dikirim', selesai: 'Selesai', batal: 'Batalkan' };
+  const list = [...d.o].reverse().filter(o => {
+    const needle = query.trim().toLowerCase();
+    const date = String(o.tanggal || o.t || '').slice(0, 10);
+    return (!fl || o.status === fl)
+      && (!needle || o.no.toLowerCase().includes(needle) || o.nama.toLowerCase().includes(needle))
+      && (!from || date >= from)
+      && (!to || date <= to);
+  });
+  const chg = async (o, s) => {
+    if (s === 'batal' && !confirm(`Batalkan ${o.no}? Stok akan dikembalikan.`)) return;
+    const updated = await run('order.status', { id: o.id, status: s });
+    if (!updated) return;
+    const key = `${o.no}:${s}`;
+    setEmailState(state => ({ ...state, [key]: 'sending' }));
+    try {
+      const delivery = await sendOrderEmail(o.no, 'status', pin, findLocalOrder(o.no));
+      setEmailState(state => ({ ...state, [key]: 'sent' }));
+      notify(delivery.recipient === 'test' ? 'Status diperbarui dan email uji terkirim ke penerima Resend yang dikonfigurasi.' : `Status diperbarui dan email ${STATUS[s]} terkirim.`);
+    } catch (error) {
+      setEmailState(state => ({ ...state, [key]: 'failed' }));
+      notify(`Status diperbarui, tetapi email gagal terkirim: ${error.message}`, true);
+    }
+  };
+  const reset = () => { setFl(''); setQuery(''); setFrom(''); setTo(''); };
+  const selected = d.o.find(o => o.id === selectedId);
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const closeOnEscape = event => { if (event.key === 'Escape') setSelectedId(null); };
+    addEventListener('keydown', closeOnEscape);
+    return () => removeEventListener('keydown', closeOnEscape);
+  }, [selectedId]);
+  useLayoutEffect(() => {
+    if (!selected || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined;
+    const ctx = gsap.context(() => gsap.from(modalRef.current, { y: 12, opacity: 0, duration: 0.2, ease: 'power2.out' }));
+    return () => ctx.revert();
+  }, [selectedId, selected]);
+  const resendStatusEmail = async order => {
+    const key = `${order.no}:${order.status}`;
+    setEmailState(state => ({ ...state, [key]: 'sending' }));
+    try {
+      const delivery = await sendOrderEmail(order.no, 'status', pin, findLocalOrder(order.no));
+      setEmailState(state => ({ ...state, [key]: 'sent' }));
+      notify(delivery.recipient === 'test' ? 'Email uji terkirim ke penerima Resend yang dikonfigurasi.' : 'Email pembaruan status terkirim.');
+    } catch (error) {
+      setEmailState(state => ({ ...state, [key]: 'failed' }));
+      notify(`Email gagal dikirim: ${error.message}`, true);
+    }
+  };
   return <><H>Pesanan</H>
-    <div className="flex gap-2 overflow-x-auto pb-3">{['', ...Object.keys(STATUS)].map(s => <button key={s} onClick={() => setFl(s)} className={'pill !px-4 !py-1.5 ' + (fl === s ? 'bg-rd text-cr' : 'bg-pe')}>{s ? STATUS[s] : 'Semua'} ({s ? d.o.filter(o => o.status === s).length : d.o.length})</button>)}</div>
-    {!list.length && <Empty>Tidak ada pesanan di kategori ini.</Empty>}
-    {list.map(o => <div key={o.id} className="card"><div className="flex flex-wrap justify-between gap-2"><div><h3 className="text-2xl text-rd">{o.no}</h3><p className="text-xs">{tgl(o.t)}</p></div><Pill k={o.status}>{STATUS[o.status]}</Pill></div>
-      <p className="mt-2 text-sm"><b>{o.nama}</b> · <a className="underline" href={wa(o.hp)} target="_blank" rel="noreferrer">{o.hp}</a>{o.cat && <> · “{o.cat}”</>}</p>
-      <ul className="text-sm mt-2">{o.items.map(i => <li key={i.vid}>{i.qty}× {i.nm}</li>)}</ul>
-      <div className="flex flex-wrap justify-between items-center gap-2 mt-3"><b>{rp(o.total)}</b><div className="flex gap-2">{(NEXT[o.status] || []).map(s => <button key={s} className={(s === 'batal' ? 'btn-g' : 'btn') + ' btn-sm'} onClick={() => chg(o, s)}>{BL[s]}</button>)}</div></div></div>)}</>;
+    <section className="card order-filters" aria-label="Cari dan filter pesanan">
+      <label className="lbl">Cari pesanan<input className="inp" type="search" placeholder="Nomor pesanan atau nama pelanggan" value={query} onChange={e => setQuery(e.target.value)} /></label>
+      <label className="lbl">Status<select className="inp" value={fl} onChange={e => setFl(e.target.value)}><option value="">Semua status</option>{Object.entries(STATUS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+      <label className="lbl">Dari tanggal<input className="inp" type="date" value={from} onChange={e => setFrom(e.target.value)} /></label>
+      <label className="lbl">Sampai tanggal<input className="inp" type="date" value={to} onChange={e => setTo(e.target.value)} /></label>
+      <button className="btn-g order-reset" onClick={reset}>Reset filter</button>
+    </section>
+    <div className="order-list-heading"><p>{list.length} dari {d.o.length} pesanan</p></div>
+    {!list.length && <Empty>{d.o.length ? 'Tidak ada pesanan yang cocok dengan filter.' : 'Belum ada pesanan.'}</Empty>}
+    {list.map(o => <article key={o.id} className="card order-card">
+      <div className="order-card-top"><div><p className="eyebrow">Nomor pesanan</p><h3>{o.no}</h3></div><Pill k={o.status}>{STATUS[o.status]}</Pill></div>
+      <div className="order-card-meta"><span><small>Pelanggan</small><b>{o.nama}</b></span><span><small>Tanggal</small><b>{tanggalOrder(o)}</b></span><span><small>Jumlah item</small><b>{o.items.reduce((sum, item) => sum + item.qty, 0)}</b></span><span><small>Total</small><b>{rp(o.total)}</b></span></div>
+      <div className="order-card-actions"><button className="btn-g btn-sm" onClick={() => setSelectedId(o.id)}>Detail pesanan</button>{(NEXT[o.status] || []).map(s => <button key={s} className={(s === 'batal' ? 'btn-g' : 'btn') + ' btn-sm'} onClick={() => chg(o, s)}>{BL[s]}</button>)}</div>
+    </article>)}
+    {selected && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setSelectedId(null); }}>
+      <section ref={modalRef} className="order-modal" role="dialog" aria-modal="true" aria-labelledby="order-modal-title">
+        <div className="order-modal-heading"><div><p className="eyebrow">Detail pesanan</p><h2 id="order-modal-title">{selected.no}</h2></div><button className="btn-g btn-sm" aria-label="Tutup detail pesanan" onClick={() => setSelectedId(null)}>Tutup</button></div>
+        <div className="order-detail-meta"><p><small>Pelanggan</small><b>{selected.nama}</b></p><p><small>Email</small><b>{selected.email || 'Belum tersedia'}</b></p><p><small>Nomor telepon</small><b>{selected.hp}</b></p><p><small>Tanggal pesanan</small><b>{tanggalOrder(selected)}</b></p><p><small>Status</small><Pill k={selected.status}>{STATUS[selected.status]}</Pill></p>
+          {selected.alamat && <p className="order-detail-wide"><small>Alamat</small><b>{selected.alamat}</b></p>}{selected.cat && <p className="order-detail-wide"><small>Catatan</small><b>{selected.cat}</b></p>}</div>
+        <div className="order-detail-items"><h3>Item pesanan</h3>{selected.items.map(i => <div key={i.vid}><span>{i.nm} <small>{i.qty} × {rp(i.harga)}</small></span><b>{rp(i.qty * i.harga)}</b></div>)}
+          <p><span>Total pesanan</span><b>{rp(selected.total)}</b></p>
+        </div>
+        {emailState[`${selected.no}:${selected.status}`] === 'failed' && <p className="email-retry-note" role="alert">Email pembaruan status gagal. Status pesanan tetap tersimpan.</p>}
+        {emailState[`${selected.no}:${selected.status}`] === 'sent' && <p className="email-retry-note" role="status">Email pembaruan status telah terkirim.</p>}
+        <div className="order-modal-actions">
+          {emailState[`${selected.no}:${selected.status}`] === 'failed' && <button className="btn" onClick={() => resendStatusEmail(selected)}>Kirim ulang email</button>}
+          {emailState[`${selected.no}:${selected.status}`] === 'sending' && <span className="text-sm">Mengirim email…</span>}
+          {(NEXT[selected.status] || []).map(s => <button key={s} className={s === 'batal' ? 'btn-g' : 'btn'} onClick={() => chg(selected, s)}>{BL[s]}</button>)}
+        </div>
+      </section>
+    </div>}
+  </>;
 }
 
 function Stok({ d, run }) {
@@ -223,10 +709,58 @@ function Laporan({ d }) {
       <div className="card"><h3 className="text-2xl text-rd mb-2">Pergerakan stok pusat</h3>{Object.keys(mv).length ? Object.entries(mv).map(([k, v]) => <p key={k} className="flex justify-between text-sm py-1"><span>{JENIS[k]}</span><b className={v >= 0 ? 'text-ok' : 'text-rd'}>{v > 0 ? '+' : ''}{v}</b></p>) : <Empty>Belum ada data.</Empty>}</div></div></>;
 }
 
-function Admin({ d, run, logout }) {
+const ADMIN_NAV = [
+  ['ring', 'Overview', '⌂', 'OVERVIEW'], ['pesanan', 'Pesanan', '◌', 'BUSINESS'], ['produk', 'Produk', '▦', 'BUSINESS'],
+  ['stok', 'Inventori', '▤', 'BUSINESS'], ['mitra', 'Mitra', '◎', 'BUSINESS'], ['jual', 'Penjualan langsung', '↗', 'BUSINESS'],
+  ['lap', 'Laporan', '⌁', 'ANALYTICS']
+];
+
+function AdminSidebar({ tab, setTab, logout, pending }) {
+  let group = '';
+  return <aside className="admin-sidebar">
+    <div className="admin-brand"><span className="admin-brand-mark">K</span><span><b>KUNCI</b><small>Control centre</small></span></div>
+    <div className="admin-nav">{ADMIN_NAV.map(([key, label, icon, section]) => {
+      const title = group !== section ? <p key={section} className="admin-nav-label">{section}</p> : null;
+      group = section;
+      return <Fragment key={key}>{title}<button className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><span className="admin-icon">{icon}</span>{label}{key === 'pesanan' && pending > 0 && <em>{pending}</em>}</button></Fragment>;
+    })}</div>
+    <div className="admin-sidebar-footer"><span className="admin-avatar">A</span><span><b>Admin bisnis</b><small>Workspace owner</small></span><button aria-label="Keluar" onClick={logout}>↪</button></div>
+  </aside>;
+}
+
+function Kpi({ label, value, note, tone = 'default' }) {
+  return <div className={'kpi-card kpi-' + tone}><div className="kpi-top"><span>{label}</span><i /></div><strong>{value}</strong><small>{note}</small></div>;
+}
+
+function Dashboard({ d, go }) {
+  const sold = d.s.reduce((sum, x) => sum + x.items.reduce((n, i) => n + i.qty, 0), 0);
+  const revenue = d.s.reduce((sum, x) => sum + x.total, 0);
+  const active = d.v.filter(x => x.aktif), low = active.filter(x => stat(x) !== 'aman').sort((a, b) => a.stok - b.stok);
+  const pending = d.o.filter(x => x.status === 'baru').length, partners = d.m.filter(x => x.aktif !== false).length;
+  const productMap = {};
+  d.s.forEach(s => s.items.forEach(i => { productMap[i.nm] ||= { qty: 0, revenue: 0 }; productMap[i.nm].qty += i.qty; productMap[i.nm].revenue += i.qty * i.harga; }));
+  const top = Object.entries(productMap).sort((a, b) => b[1].qty - a[1].qty).slice(0, 4), maxTop = top[0]?.[1].qty || 1;
+  const days = [...Array(7)].map((_, index) => { const date = new Date(); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() - (6 - index)); const key = date.toISOString().slice(0, 10); return { key, label: date.toLocaleDateString('id-ID', { weekday: 'short' }), total: d.s.filter(x => x.t.slice(0, 10) === key).reduce((n, x) => n + x.total, 0) }; });
+  const maxDay = Math.max(...days.map(x => x.total), 1), orderStates = Object.entries(STATUS).map(([key, label]) => ({ key, label, count: d.o.filter(x => x.status === key).length })).filter(x => x.count);
+  const distributed = d.m.reduce((sum, m) => sum + Object.values(m.stok || {}).reduce((n, qty) => n + Number(qty || 0), 0), 0);
+  return <div className="dashboard-page">
+    <div className="admin-topbar"><div><p className="eyebrow">Workspace / Overview</p><h1>Business overview</h1><p className="admin-subtitle">Pantau penjualan, inventori, dan operasional dalam satu ruang kerja.</p></div><div className="admin-period"><span className="status-dot" /> Live workspace <b>{new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}</b></div></div>
+    <div className="dashboard-hero"><div><span className="eyebrow light">Pedasan Kunchung / Command centre</span><h2>Good morning, admin.</h2><p>Berikut ringkasan kondisi bisnis berdasarkan transaksi yang sudah tercatat.</p></div><button className="btn light-btn" onClick={() => go('pesanan')}>Lihat pesanan <span>↗</span></button></div>
+    <div className="kpi-grid"><Kpi label="Total omzet" value={rp(revenue)} note={d.s.length ? `${d.s.length} transaksi tercatat` : 'Belum ada transaksi'} tone="accent" /><Kpi label="Total pesanan" value={d.o.length} note={pending ? `${pending} perlu diproses` : 'Tidak ada pesanan baru'} tone="warm" /><Kpi label="Produk terjual" value={sold} note={`${active.length} varian aktif`} /><Kpi label="Status inventori" value={low.length} note={low.length ? `${low.length} varian perlu perhatian` : 'Semua stok aman'} tone={low.length ? 'warning' : 'good'} /></div>
+    <div className="dashboard-grid dashboard-grid-main">
+      <section className="panel chart-panel"><div className="panel-heading"><div><p className="eyebrow">Performance</p><h3>Revenue trend</h3></div><span className="panel-note">7 hari terakhir</span></div>{d.s.length ? <div className="bar-chart" aria-label="Grafik omzet tujuh hari terakhir">{days.map(day => <div className="bar-column" key={day.key}><div className="bar-value">{day.total ? rp(day.total).replace('Rp', 'Rp ') : '—'}</div><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(day.total / maxDay * 100, day.total ? 8 : 2)}%` }} /></div><span>{day.label}</span></div>)}</div> : <Empty>Grafik akan muncul setelah transaksi selesai tercatat.</Empty>}</section>
+      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Orders</p><h3>Order activity</h3></div><button className="text-link" onClick={() => go('pesanan')}>Kelola ↗</button></div>{orderStates.length ? <div className="order-status-list">{orderStates.map(item => <button key={item.key} onClick={() => go('pesanan')}><span className={'status-dot status-' + item.key} /><span>{item.label}</span><b>{item.count}</b></button>)}</div> : <Empty>Belum ada aktivitas order.</Empty>}<div className="panel-divider" /><div className="mini-metric"><span>Active partners</span><b>{partners}</b><small>{distributed} unit stok terdistribusi</small></div></section>
+    </div>
+    <div className="dashboard-grid dashboard-grid-secondary"><section className="panel"><div className="panel-heading"><div><p className="eyebrow">Inventory intelligence</p><h3>Stock watchlist</h3></div><button className="text-link" onClick={() => go('stok')}>Buka inventori ↗</button></div>{low.length ? <div className="stock-list">{low.slice(0, 4).map(item => <button key={item.id} onClick={() => go('stok')}><span><b>{item.varian}</b><small>{item.ukuran} · minimum {item.min}</small></span><strong className={stat(item) === 'habis' ? 'danger' : ''}>{item.stok}<small>unit tersisa</small></strong></button>)}</div> : <Empty>Semua varian berada di atas batas minimum.</Empty>}</section><section className="panel"><div className="panel-heading"><div><p className="eyebrow">Product performance</p><h3>Top sellers</h3></div><button className="text-link" onClick={() => go('lap')}>Lihat laporan ↗</button></div>{top.length ? <div className="top-products">{top.map(([name, item], index) => <div key={name}><span className="rank">0{index + 1}</span><div className="product-bar"><div><b>{name}</b><span>{item.qty} unit · {rp(item.revenue)}</span></div><i><em style={{ width: `${item.qty / maxTop * 100}%` }} /></i></div></div>)}</div> : <Empty>Belum ada penjualan untuk dirangking.</Empty>}</section></div>
+    <section className="panel recent-orders"><div className="panel-heading"><div><p className="eyebrow">Aktivitas terbaru</p><h3>Pesanan terakhir</h3></div><button className="text-link" onClick={() => go('pesanan')}>Semua pesanan ↗</button></div>{d.o.length ? <div className="recent-order-list">{[...d.o].reverse().slice(0, 5).map(order => <button key={order.id} onClick={() => go('pesanan')}><span><b>{order.no} · {order.nama}</b><small>{tgl(order.t)}</small></span><span className="recent-order-total"><b>{rp(order.total)}</b><Pill k={order.status}>{STATUS[order.status]}</Pill></span></button>)}</div> : <Empty>Aktivitas pesanan akan tampil di sini.</Empty>}</section>
+    <div className="quick-actions"><span className="eyebrow">Quick actions</span><button onClick={() => go('produk')}>＋ Tambah produk</button><button onClick={() => go('stok')}>＋ Update stok</button><button onClick={() => go('jual')}>＋ Catat penjualan</button><button onClick={() => go('mitra')}>＋ Tambah mitra</button></div>
+  </div>;
+}
+
+function Admin({ d, run, logout, notify, pin }) {
   const [tab, setTab] = useState('ring'), T = [['ring', 'Ringkasan'], ['pesanan', 'Pesanan'], ['stok', 'Stok'], ['produk', 'Produk'], ['mitra', 'Mitra'], ['jual', 'Penjualan'], ['lap', 'Laporan']], nb = d.o.filter(o => o.status === 'baru').length;
-  const V = { ring: <Ringkasan d={d} go={setTab} />, pesanan: <Pesanan d={d} run={run} />, stok: <Stok d={d} run={run} />, produk: <Produk d={d} run={run} />, mitra: <MitraAdmin d={d} run={run} />, jual: <Penjualan d={d} run={run} />, lap: <Laporan d={d} /> };
-  return <><div className="flex gap-2 overflow-x-auto pb-4 items-center">{T.map(([k, n]) => <button key={k} onClick={() => setTab(k)} className={'pill !px-4 !py-2 !text-sm ' + (tab === k ? 'bg-rd text-cr' : 'bg-pe')}>{n}{k === 'pesanan' && nb > 0 && ` (${nb})`}</button>)}<button className="btn-g btn-sm ml-auto" onClick={logout}>Keluar</button></div>{V[tab]}</>;
+  const V = { ring: <Dashboard d={d} go={setTab} />, pesanan: <Pesanan d={d} run={run} notify={notify} pin={pin} />, stok: <Stok d={d} run={run} />, produk: <Produk d={d} run={run} />, mitra: <MitraAdmin d={d} run={run} />, jual: <Penjualan d={d} run={run} />, lap: <Laporan d={d} /> };
+  return <div className="admin-layout"><AdminSidebar tab={tab} setTab={setTab} logout={logout} pending={nb} /><section className="admin-content"><div className="admin-mobile-nav">{T.map(([k, n]) => <button key={k} onClick={() => setTab(k)} className={tab === k ? 'active' : ''}>{n}{k === 'pesanan' && nb > 0 && ` (${nb})`}</button>)}</div>{V[tab]}</section></div>;
 }
 
 function Login({ onLogin }) {
@@ -238,7 +772,8 @@ function Login({ onLogin }) {
 gsap.registerPlugin(ScrollTrigger);
 
 export default function App() {
-  const [route, setRoute] = useState(location.hash.slice(1) || '/'), [catalog, setCatalog] = useState(null), [data, setData] = useState(null), [pin, setPin] = useState(sessionStorage.getItem('kpin') || ''), [toast, setToast] = useState(null);
+  const routeFromLocation = () => location.hash.slice(1) || (location.pathname === '/tracking' ? '/tracking' : '/');
+  const [route, setRoute] = useState(routeFromLocation), [catalog, setCatalog] = useState(null), [data, setData] = useState(null), [pin, setPin] = useState(sessionStorage.getItem('kpin') || ''), [toast, setToast] = useState(null);
   const shell = useRef(null);
   const say = (m, err) => { setToast({ m, err }); clearTimeout(window._kt); window._kt = setTimeout(() => setToast(null), 3200); };
   const refresh = useCallback(async p => { const r = await load(p ?? pin); setCatalog(r.catalog); setData(r.data); return r; }, [pin]);
@@ -248,36 +783,40 @@ export default function App() {
   };
   const login = async p => { const r = await load(p); setCatalog(r.catalog); if (r.data) { setData(r.data); setPin(p); sessionStorage.setItem('kpin', p); } else say('PIN salah.', 1); };
   const logout = () => { setPin(''); setData(null); sessionStorage.removeItem('kpin'); };
-  useEffect(() => { refresh().catch(() => say('Gagal memuat data.', 1)); const h = () => { setRoute(location.hash.slice(1) || '/'); scrollTo(0, 0); }; addEventListener('hashchange', h); const t = setInterval(() => refresh().catch(() => {}), 20000); return () => { removeEventListener('hashchange', h); clearInterval(t); }; }, [refresh]);
+  useEffect(() => { refresh().catch(() => say('Gagal memuat data.', 1)); const h = () => { setRoute(routeFromLocation()); scrollTo(0, 0); }; addEventListener('hashchange', h); addEventListener('popstate', h); const t = setInterval(() => refresh().catch(() => {}), 20000); return () => { removeEventListener('hashchange', h); removeEventListener('popstate', h); clearInterval(t); }; }, [refresh]);
   useLayoutEffect(() => {
     if (!shell.current) return undefined;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const ctx = gsap.context(() => {
       if (reduced) return;
       const intro = gsap.timeline({ defaults: { ease: 'power3.out' } });
-      intro.from('[data-hero]', { y: -18, opacity: 0, duration: 0.55 })
-        .from('[data-nav] a', { y: 10, opacity: 0, duration: 0.35, stagger: 0.06 }, '-=0.25')
-        .from('[data-page] > *', { y: 18, opacity: 0, duration: 0.45, stagger: 0.06 }, '-=0.15');
+      const hero = shell.current.querySelector('[data-hero]');
+      const nav = shell.current.querySelectorAll('[data-nav] a');
+      const page = shell.current.querySelectorAll('[data-page] > *');
+      if (hero) intro.from(hero, { y: -18, opacity: 0, duration: 0.55 });
+      if (nav.length) intro.from(nav, { y: 10, opacity: 0, duration: 0.35, stagger: 0.06 }, hero ? '-=0.25' : undefined);
+      if (page.length) intro.from(page, { y: 18, opacity: 0, duration: 0.45, stagger: 0.06 }, hero || nav.length ? '-=0.15' : undefined);
       gsap.utils.toArray('[data-page] .card').forEach((card, index) => {
         gsap.from(card, { y: 24, opacity: 0, duration: 0.5, delay: Math.min(index * 0.035, 0.25), ease: 'power2.out', scrollTrigger: { trigger: card, start: 'top 90%', once: true } });
       });
     }, shell);
     return () => ctx.revert();
   }, [route, catalog, data]);
-  const N = [['/', 'Pesan'], ['/lacak', 'Lacak pesanan'], ['/mitra', 'Portal mitra'], ['/admin', 'Admin']];
+  const N = [['/', 'Pesan'], ['/tracking', 'Lacak pesanan'], ['/mitra', 'Portal mitra'], ['/admin', 'Admin'], ['/demo-tracking', 'Demo user story']];
+  const adminWorkspace = route === '/admin' && Boolean(data);
   let page;
   if (!catalog) page = <Empty>Memuat…</Empty>;
-  else if (route === '/lacak') page = <Track run={run} />;
+  else if (route === '/tracking' || route === '/lacak') page = <Track run={run} />;
+  else if (route === '/demo-tracking') page = <DemoStories catalog={catalog} />;
   else if (route === '/mitra') page = <Mitra run={run} />;
-  else if (route === '/admin') page = data ? <Admin d={data} run={run} logout={logout} /> : <Login onLogin={login} />;
-  else page = <Shop catalog={catalog} run={run} />;
+  else if (route === '/admin') page = data ? <Admin d={data} run={run} logout={logout} notify={say} pin={pin} /> : <Login onLogin={login} />;
+  else page = <Shop catalog={catalog} run={run} notify={say} />;
   return <div ref={shell} className="app-shell min-h-screen">
-    <header className="site-header bg-or px-4 pt-4" data-hero><div className="max-w-5xl mx-auto flex items-end justify-between gap-3 flex-wrap">
-      <a href="#/"><div className="font-display text-6xl sm:text-7xl leading-[.9] text-cr">KUNCI</div><p className="text-cr font-medium text-sm my-2">Pedasan Kunchung · stok, pesanan & penjualan terpusat</p></a>
-      <span className="bg-cr text-rd text-xs font-semibold rounded-full px-3 py-1 mb-3">{getMode() === 'db' ? 'Database tersambung' : 'Mode lokal'}</span></div>
-      <nav className="site-nav max-w-5xl mx-auto flex gap-1.5 overflow-x-auto" data-nav aria-label="Navigasi utama">{N.map(([r, n]) => <a key={r} href={'#' + r} className={(route === r ? 'active ' : '') + 'px-4 py-2.5 rounded-t-2xl text-sm whitespace-nowrap'}>{n}</a>)}</nav></header>
-    <main className="page-wrap" data-page>{page}</main>
-    <footer className="site-footer"><span>KUNCI / Pedasan Kunchung</span><span>Stok, pesanan & penjualan terpusat</span></footer>
+    {!adminWorkspace && <header className="site-header bg-or px-4 pt-4" data-hero><div className="max-w-5xl mx-auto flex items-end justify-between gap-3 flex-wrap">
+      <a href="#/"><div className="font-display text-6xl sm:text-7xl leading-[.9] text-cr">KUNCI</div><p className="text-cr font-medium text-sm my-2">Pedasan Kunchung · stok, pesanan & penjualan terpusat</p></a></div>
+      <nav className="site-nav max-w-5xl mx-auto flex gap-1.5 overflow-x-auto" data-nav aria-label="Navigasi utama">{N.map(([r, n]) => <a key={r} href={'#' + r} className={(route === r ? 'active ' : '') + 'px-4 py-2.5 rounded-t-2xl text-sm whitespace-nowrap'}>{n}</a>)}</nav></header>}
+    <main className={'page-wrap' + (adminWorkspace ? ' admin-page-wrap' : '')} data-page>{page}</main>
+    {!adminWorkspace && <footer className="site-footer"><span>KUNCI / Pedasan Kunchung</span><span>Stok, pesanan & penjualan terpusat</span></footer>}
     {toast && <div role="status" className={'toast fixed bottom-5 left-1/2 -translate-x-1/2 max-w-[92vw] rounded-2xl px-5 py-3 text-sm font-medium text-cr shadow-lg z-50 ' + (toast.err ? 'error bg-rd' : 'bg-ink')}>{toast.m}</div>}
   </div>;
 }
