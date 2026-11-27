@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { gsap } from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { load, act, getMode } from './api.js';
 import { WA_NUMBER } from './config.js';
 import { JENIS, STATUS, NEXT, stat } from '../shared/logic.js';
@@ -233,8 +235,11 @@ function Login({ onLogin }) {
 }
 
 /* ───────── SHELL ───────── */
+gsap.registerPlugin(ScrollTrigger);
+
 export default function App() {
   const [route, setRoute] = useState(location.hash.slice(1) || '/'), [catalog, setCatalog] = useState(null), [data, setData] = useState(null), [pin, setPin] = useState(sessionStorage.getItem('kpin') || ''), [toast, setToast] = useState(null);
+  const shell = useRef(null);
   const say = (m, err) => { setToast({ m, err }); clearTimeout(window._kt); window._kt = setTimeout(() => setToast(null), 3200); };
   const refresh = useCallback(async p => { const r = await load(p ?? pin); setCatalog(r.catalog); setData(r.data); return r; }, [pin]);
   const run = async (type, payload, ok) => {
@@ -244,6 +249,21 @@ export default function App() {
   const login = async p => { const r = await load(p); setCatalog(r.catalog); if (r.data) { setData(r.data); setPin(p); sessionStorage.setItem('kpin', p); } else say('PIN salah.', 1); };
   const logout = () => { setPin(''); setData(null); sessionStorage.removeItem('kpin'); };
   useEffect(() => { refresh().catch(() => say('Gagal memuat data.', 1)); const h = () => { setRoute(location.hash.slice(1) || '/'); scrollTo(0, 0); }; addEventListener('hashchange', h); const t = setInterval(() => refresh().catch(() => {}), 20000); return () => { removeEventListener('hashchange', h); clearInterval(t); }; }, [refresh]);
+  useLayoutEffect(() => {
+    if (!shell.current) return undefined;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const ctx = gsap.context(() => {
+      if (reduced) return;
+      const intro = gsap.timeline({ defaults: { ease: 'power3.out' } });
+      intro.from('[data-hero]', { y: -18, opacity: 0, duration: 0.55 })
+        .from('[data-nav] a', { y: 10, opacity: 0, duration: 0.35, stagger: 0.06 }, '-=0.25')
+        .from('[data-page] > *', { y: 18, opacity: 0, duration: 0.45, stagger: 0.06 }, '-=0.15');
+      gsap.utils.toArray('[data-page] .card').forEach((card, index) => {
+        gsap.from(card, { y: 24, opacity: 0, duration: 0.5, delay: Math.min(index * 0.035, 0.25), ease: 'power2.out', scrollTrigger: { trigger: card, start: 'top 90%', once: true } });
+      });
+    }, shell);
+    return () => ctx.revert();
+  }, [route, catalog, data]);
   const N = [['/', 'Pesan'], ['/lacak', 'Lacak pesanan'], ['/mitra', 'Portal mitra'], ['/admin', 'Admin']];
   let page;
   if (!catalog) page = <Empty>Memuat…</Empty>;
@@ -251,12 +271,13 @@ export default function App() {
   else if (route === '/mitra') page = <Mitra run={run} />;
   else if (route === '/admin') page = data ? <Admin d={data} run={run} logout={logout} /> : <Login onLogin={login} />;
   else page = <Shop catalog={catalog} run={run} />;
-  return <div className="min-h-screen">
-    <header className="bg-or px-4 pt-4"><div className="max-w-5xl mx-auto flex items-end justify-between gap-3 flex-wrap">
+  return <div ref={shell} className="app-shell min-h-screen">
+    <header className="site-header bg-or px-4 pt-4" data-hero><div className="max-w-5xl mx-auto flex items-end justify-between gap-3 flex-wrap">
       <a href="#/"><div className="font-display text-6xl sm:text-7xl leading-[.9] text-cr">KUNCI</div><p className="text-cr font-medium text-sm my-2">Pedasan Kunchung · stok, pesanan & penjualan terpusat</p></a>
       <span className="bg-cr text-rd text-xs font-semibold rounded-full px-3 py-1 mb-3">{getMode() === 'db' ? 'Database tersambung' : 'Mode lokal'}</span></div>
-      <nav className="max-w-5xl mx-auto flex gap-1.5 overflow-x-auto">{N.map(([r, n]) => <a key={r} href={'#' + r} className={'px-4 py-2.5 rounded-t-2xl text-sm whitespace-nowrap ' + (route === r ? 'bg-cr text-rd font-semibold' : 'bg-cr/35 text-ink font-medium')}>{n}</a>)}</nav></header>
-    <main className="max-w-5xl mx-auto px-4 py-6 pb-16">{page}</main>
-    {toast && <div role="status" className={'fixed bottom-5 left-1/2 -translate-x-1/2 max-w-[92vw] rounded-2xl px-5 py-3 text-sm font-medium text-cr shadow-lg z-50 ' + (toast.err ? 'bg-rd' : 'bg-ink')}>{toast.m}</div>}
+      <nav className="site-nav max-w-5xl mx-auto flex gap-1.5 overflow-x-auto" data-nav aria-label="Navigasi utama">{N.map(([r, n]) => <a key={r} href={'#' + r} className={(route === r ? 'active ' : '') + 'px-4 py-2.5 rounded-t-2xl text-sm whitespace-nowrap'}>{n}</a>)}</nav></header>
+    <main className="page-wrap" data-page>{page}</main>
+    <footer className="site-footer"><span>KUNCI / Pedasan Kunchung</span><span>Stok, pesanan & penjualan terpusat</span></footer>
+    {toast && <div role="status" className={'toast fixed bottom-5 left-1/2 -translate-x-1/2 max-w-[92vw] rounded-2xl px-5 py-3 text-sm font-medium text-cr shadow-lg z-50 ' + (toast.err ? 'error bg-rd' : 'bg-ink')}>{toast.m}</div>}
   </div>;
 }
